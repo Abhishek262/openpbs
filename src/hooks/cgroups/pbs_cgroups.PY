@@ -1906,11 +1906,18 @@ class NodeUtils(object):
         and the values are the PCI bus IDs.
         """
         pbs.logmsg(pbs.EVENT_DEBUG4, '%s: Method called' % caller_name())
+        if self.cfg['gpu_vendor'] == 'nvidia':
+            return self._discover_gpus_nvidia()
+        if self.cfg['gpu_vendor'] == 'amd':
+            return self._discover_gpus_amd()
+        else:
+            return {}
+
+    def _discover_gpus_nvidia(self):
+
         gpus = {}
         if self.cfg['discover_gpus'] and self.cfg['nvidia-smi']:
             cmd = [self.cfg['nvidia-smi'], '-q', '-x']
-        else:
-            return gpus
         pbs.logmsg(pbs.EVENT_DEBUG4, 'NVIDIA SMI command: %s' % cmd)
         time_start = time.time()
         mig_found = False
@@ -2094,6 +2101,83 @@ class NodeUtils(object):
         pbs.logmsg(pbs.EVENT_DEBUG, 'Cannot find minor number for %s'
                    % capname)
         return -1
+
+    def _discover_gpus_amd(self):
+
+        gpus = {}
+        if self.cfg['discover_gpus'] and self.cfg['rocm-smi']:
+            cmd = [self.cfg['rocm-smi'], '--showid',
+                   '--showuniqueid', '--showbus', '--json']
+        pbs.logmsg(pbs.EVENT_DEBUG4, 'ROCM SMI command: %s' % cmd)
+        time_start = time.time()
+        mig_found = False
+        try:
+            # Try running the nvidia-smi command
+            process = subprocess.Popen(cmd, shell=False,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE,
+                                       universal_newlines=True)
+            out = process.communicate()[0]
+        except Exception:
+            pbs.logmsg(pbs.EVENT_DEBUG4, 'Failed to execute: %s' %
+                       " ".join(cmd))
+            pbs.logmsg(pbs.EVENT_DEBUG3, '%s: No GPUs found' % caller_name())
+            return gpus
+        elapsed_time = time.time() - time_start
+        if elapsed_time > 2.0:
+            pbs.logmsg(pbs.EVENT_DEBUG,
+                       '%s: rocm-smi call took %f seconds' %
+                       (caller_name(), elapsed_time))
+
+        try:
+            # try parsing the output
+            pbs.logmsg(pbs.EVENT_DEBUG, out)
+            
+        except Exception as exc:
+            pbs.logmsg(pbs.EVENT_DEBUG, 'Unexpected error: %s' % exc)
+
+        # if we get a non-str type then convert before calling xmlet
+        # should not happen since we passed universal_newlines True
+        # try:
+        #     # Try parsing the output
+        #     import xml.etree.ElementTree as xmlet
+        #     root = xmlet.fromstring(stringified_output(out))
+        #     pbs.logmsg(pbs.EVENT_DEBUG4, 'root.tag: %s' % root.tag)
+        #     for child in root:
+        #         if child.tag == 'gpu':
+        #             bus_id = child.get('id')
+        #             result = re.match(r'([^:]+):(.*)', bus_id)
+        #             if not result:
+        #                 raise ValueError('GPU ID not recognized: ' + bus_id)
+        #             domain, instance = result.groups()
+        #             # Make sure the PCI domain is 16 bits (4 hex digits)
+        #             if len(domain) == 8:
+        #                 domain = domain[-4:]
+        #             if len(domain) != 4:
+        #                 raise ValueError('GPU ID not recognized: ' + bus_id)
+        #             name = 'nvidia%s' % child.find('minor_number').text
+        #             mig_enabled = False
+        #             mig_mode = child.find('mig_mode')
+        #             if mig_mode is not None:
+        #                 current_mig = mig_mode.find('current_mig')
+        #                 if current_mig is not None:
+        #                     if current_mig.text == 'Enabled':
+        #                         mig_found = True
+        #                         mig_enabled = True
+        #             gpus[name] = {
+        #                 'pci_bus_id': (domain + ':' + instance).lower(),
+        #                 'uuid': child.find('uuid').text,
+        #                 'mig': mig_enabled
+        #             }
+        # except Exception as exc:
+        #     pbs.logmsg(pbs.EVENT_DEBUG, 'Unexpected error: %s' % exc)
+
+        # # at least one gpu had mig enabled, let's add the gis
+        # if mig_found:
+        #     self._discover_migs(gpus)
+
+        pbs.logmsg(pbs.EVENT_DEBUG4, 'GPUs: %s' % gpus)
+        return gpus  
 
     def _discover_meminfo(self):
         """
@@ -3324,8 +3408,11 @@ class CgroupUtils(object):
         defaults['cgroup_lock_file'] = os.path.join(PBS_MOM_HOME, 'mom_priv',
                                                     'cgroups.lock')
         defaults['discover_gpus'] = True
+        defaults['gpu_vendor'] = "nvidia"
         defaults['nvidia-smi'] = os.path.join(os.sep, 'usr', 'bin',
                                               'nvidia-smi')
+        defaults['rocm-smi'] = os.path.join(os.sep, 'usr', 'bin',
+                                            'rocm-smi')
         defaults['exclude_hosts'] = []
         defaults['exclude_vntypes'] = []
         defaults['run_only_on_hosts'] = []
