@@ -2131,53 +2131,56 @@ class NodeUtils(object):
 
         try:
             # try parsing the output
-            pbs.logmsg(pbs.EVENT_DEBUG, out)
-            
+            # pbs.logmsg(pbs.EVENT_DEBUG, out)
+            import json
+            data = json.loads(out)
+            pbs.logmsg(pbs.EVENT_DEBUG, str(data["card0"]))
+
+            gpu_counter = 0
+            curr_gpu_id = ""
+            mig_enabled = False
+
+            # singular, non mig GPU
+            if(len(data.keys())==1):
+                card = data[data.keys[0]]
+                mig_enabled = False
+                pci_bus_id = card["PCI Bus"]
+                uuid = card["GPU ID"]
+                name = "amd0"
+                gpus[name] = {
+                        'pci_bus_id': pci_bus_id,
+                        'uuid': uuid,
+                        'mig': mig_enabled
+                }
+
+            else:
+                mig_enabled = True
+                render_device_count = 0
+                for card in data.keys():
+                    if(curr_gpu_id != data[card]["GPU ID"]):
+                        curr_gpu_id = data[card]["GPU ID"]
+                        name = "amd" + str(gpu_counter)
+                        gpu_counter +=1
+                        render_device_count = 0
+                        gpus[name] = {
+                                    'uuid': curr_gpu_id,
+                                    'mig': mig_enabled
+                        }
+
+                    if(mig_enabled):
+                        gis = dict()
+                        gis[render_device_count]["pci_bus_id"] = data[card]["PCI Bus"]
+                        gis[render_device_count]["render_no"] = render_device_count
+                        gis[render_device_count]["minor"] = find_minor(pci_bus_id)
+                        gpus[name]["gis"] = gis
+
+
         except Exception as exc:
-            pbs.logmsg(pbs.EVENT_DEBUG, 'Unexpected error: %s' % exc)
-
-        # if we get a non-str type then convert before calling xmlet
-        # should not happen since we passed universal_newlines True
-        # try:
-        #     # Try parsing the output
-        #     import xml.etree.ElementTree as xmlet
-        #     root = xmlet.fromstring(stringified_output(out))
-        #     pbs.logmsg(pbs.EVENT_DEBUG4, 'root.tag: %s' % root.tag)
-        #     for child in root:
-        #         if child.tag == 'gpu':
-        #             bus_id = child.get('id')
-        #             result = re.match(r'([^:]+):(.*)', bus_id)
-        #             if not result:
-        #                 raise ValueError('GPU ID not recognized: ' + bus_id)
-        #             domain, instance = result.groups()
-        #             # Make sure the PCI domain is 16 bits (4 hex digits)
-        #             if len(domain) == 8:
-        #                 domain = domain[-4:]
-        #             if len(domain) != 4:
-        #                 raise ValueError('GPU ID not recognized: ' + bus_id)
-        #             name = 'nvidia%s' % child.find('minor_number').text
-        #             mig_enabled = False
-        #             mig_mode = child.find('mig_mode')
-        #             if mig_mode is not None:
-        #                 current_mig = mig_mode.find('current_mig')
-        #                 if current_mig is not None:
-        #                     if current_mig.text == 'Enabled':
-        #                         mig_found = True
-        #                         mig_enabled = True
-        #             gpus[name] = {
-        #                 'pci_bus_id': (domain + ':' + instance).lower(),
-        #                 'uuid': child.find('uuid').text,
-        #                 'mig': mig_enabled
-        #             }
-        # except Exception as exc:
-        #     pbs.logmsg(pbs.EVENT_DEBUG, 'Unexpected error: %s' % exc)
-
-        # # at least one gpu had mig enabled, let's add the gis
-        # if mig_found:
-        #     self._discover_migs(gpus)
+            pbs.logmsg(pbs.EVENT_DEBUG, '\n\nUnexpected error: %s\n\n' % exc)
 
         pbs.logmsg(pbs.EVENT_DEBUG4, 'GPUs: %s' % gpus)
         return gpus  
+
 
     def _discover_meminfo(self):
         """
