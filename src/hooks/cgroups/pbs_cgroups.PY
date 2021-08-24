@@ -1817,7 +1817,8 @@ class NodeUtils(object):
         # into their own dictionary.
         devices['gpu'] = {}
         gpus = self._discover_gpus()
-        if gpus:
+
+        if gpus and  self.cfg['gpu_vendor'] == 'nvidia':
             for dclass in devices:
                 for inst in devices[dclass]:
                     for gpuid in gpus:
@@ -1828,6 +1829,8 @@ class NodeUtils(object):
                             # file, so we must get the major, minor and device
                             # type from the matching /dev/nvidia[0-9]*
                             if gpuid.startswith('nvidia'):
+                                pbs.logmsg(pbs.EVENT_DEBUG, "IN nvidia  " )
+
                                 path = os.path.join(os.sep, 'dev', gpuid)
                                 # If the stat fails, continue.
                                 devinfo = self._devinfo(path)
@@ -1842,8 +1845,28 @@ class NodeUtils(object):
                                 devices[dclass][inst]['device'] = path
                                 devices[dclass][inst]['uuid'] = \
                                     gpus[gpuid]['uuid']
+
+        if gpus and  self.cfg['gpu_vendor'] == 'amd':
+            for gpuid in gpus.keys():
+                path = os.path.join(os.sep, 'dev', 'dri','renderD'+str(int(gpuid[3:])+128))
+                amd_gpu = dict()
+                amd_gpu['realpath'] = ""
+                amd_gpu['numa_node'] = 0
+                amd_gpu['bus_id'] = gpus[gpuid]['pci_bus_id']
+
+                devinfo = self._devinfo(path)
+                amd_gpu['major'] = devinfo['major']
+                amd_gpu['minor'] = devinfo['minor']
+                amd_gpu['type'] = devinfo['type']
+                amd_gpu['uuid'] = gpus[gpuid]['uuid']
+                amd_gpu['device'] = path 
+
+                devices['gpu'][gpuid] = amd_gpu
+    
+
         # if any gpu has mig enabled, let's use them
         if gpus and any(gpus[gpu]['mig'] for gpu in gpus):
+
             nvidia_cap_major = None
             with open(os.path.join(os.sep, 'proc', 'devices')) as f:
                 for line in f:
@@ -2107,7 +2130,7 @@ class NodeUtils(object):
         pbs.logmsg(pbs.EVENT_DEBUG4, '%s: Method called' % caller_name())
         gpus = {}
         if self.cfg['discover_gpus'] and self.cfg['rocm-smi']:
-            cmd = [self.cfg['rocm-smi'], '--showid',
+            cmd = [self.cfg['rocm-smi'],
                    '--showuniqueid', '--showbus', '--json']
         pbs.logmsg(pbs.EVENT_DEBUG4, 'ROCM SMI command: %s' % cmd)
         time_start = time.time()
@@ -2130,67 +2153,36 @@ class NodeUtils(object):
                        '%s: rocm-smi call took %f seconds' %
                        (caller_name(), elapsed_time))
 
-        # try:
+        try:
             # try parsing the output
-            # pbs.logmsg(pbs.EVENT_DEBUG, out)
-        import json
-        data = json.loads(out)
-        pbs.logmsg(pbs.EVENT_DEBUG, str(data["card0"]))
+            import json
+            data = json.loads(out)
+            pbs.logmsg(pbs.EVENT_DEBUG, str(data["card0"]))
 
-        gpu_counter = 0
-        curr_gpu_id = ""
-        mig_enabled = False
-        gis = dict()
+            gpu_counter = 0
+            gis = dict()
 
-        # singular, non mig GPU
-        if(len(data.keys())==1):
-            card = data[data.keys[0]]
             mig_enabled = False
-            pci_bus_id = card["PCI Bus"]
-            uuid = card["GPU ID"]
-            name = "amd0"
-            gpus[name] = {
-                    'pci_bus_id': pci_bus_id,
-                    'uuid': uuid,
-                    'mig': mig_enabled
-            }
-
-        else:
-            mig_enabled = True
             render_device_count = 0
+
             for card in data.keys():
-                #Upon discovering a new GPU
-                if(curr_gpu_id != data[card]["GPU ID"]):
-                    if(gpu_counter>=1):
-                        gpus[name]["gis"] = gis
-                        gis = dict()
-                    curr_gpu_id = data[card]["GPU ID"]
-                    name = "amd" + str(gpu_counter)
-                    gpu_counter +=1
-                    render_device_count = 0
-                    gpus[name] = {
-                                'gpuid': curr_gpu_id,
-                                'mig': mig_enabled,
-                                'pci_bus_id': ""
-                    }
+                name = "amd" + str(card[4:])
+                pci_bus_id = data[card]["PCI Bus"]
+                uuid = data[card]["Unique ID"]
 
-                if(mig_enabled):
-                    gis_details_dict= dict()
-                    render_device_count = int(card[4:])
-                    gis_details_dict["pci_bus_id"] = data[card]["PCI Bus"]
-                    gis_details_dict["render_no"] = render_device_count
-                    gis_details_dict["uuid"] = data[card]["Unique ID"]
-                    gis[render_device_count] = gis_details_dict
+                gpus[name]= {
+                    'pci_bus_id' : pci_bus_id,
+                    'uuid' : uuid,
+                    'mig' : mig_enabled
+                }
 
-            gpus[name]["gis"] = gis 
-        
-        # except Exception as exc:
-        #     pbs.logmsg(pbs.EVENT_DEBUG, '\n\nUnexpected error: %s\n\n' % exc)
+        except Exception as exc:
+            pbs.logmsg(pbs.EVENT_DEBUG, '\n\nUnexpected error: %s\n\n' % exc)
 
-        pbs.logmsg(pbs.EVENT_DEBUG4, 'GPUs: %s' % gpus)
+        pbs.logmsg(pbs.EVENT_DEBUG, 'GPUs: %s' % gpus)
         return gpus  
 
-    def discover_amdgpu_minor(self,gpus):
+    def discover_amdgpu_minor(self):
         cmd = ["/usr/bin/ls","-l","/dev/dri"]
         out = []
         try:
@@ -2208,22 +2200,26 @@ class NodeUtils(object):
         #make for multiple gpus
         minor_list = []
         temp = []
-        curr_major = 0
+        major = 0
         for line in out:
             if "render" in line:
                 lsinfo = line.split()
-                if(int(lsinfo[4]) != curr_major):
-                    curr_major = lsinfo[4]
-                    if(curr_major!=0):
+                curr_major = int(lsinfo[4].strip(","))
+                if(curr_major != major):
+                    if(major!=0):
                         temp.sort()
                         minor_list.append(temp)
                         temp = []
+                    major = int(lsinfo[4].strip(","))
 
-                temp.append(int(lsinfo)[5])
-        
-        for i in range(len(minor_list)):
-            for j in range(len(minor_list[i])):
-                gpus["amd"+i]["gis"][j]["minor"] = minor_list[i][j]
+                temp.append(int(lsinfo[5]))
+
+        minor_list.append(temp)
+        pbs.logmsg(pbs.EVENT_DEBUG, '%s: MINOR LIST : ' + str(minor_list))
+
+        # for i in range(len(minor_list)):
+        #     for j in range(len(minor_list[i])):
+        #         gpus["amd"+str(i)]["gis"][j]["minor"] = minor_list[i][j]
         
 
     def _discover_meminfo(self):
