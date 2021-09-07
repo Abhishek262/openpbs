@@ -1091,16 +1091,27 @@ class HookUtils(object):
                             gpus.append(node.devices['gpu'][key]['uuid'])
                         if 'uuids' in node.devices['gpu'][key]:
                             gpus.extend(node.devices['gpu'][key]['uuids'])
+                    elif (key.startswith('amd')
+                            and "gpu" in node.devices
+                            and key in node.devices['gpu']):
+                        if 'uuid' in node.devices['gpu'][key]:
+                            gpus.append(node.devices['gpu'][key]['uuid'])
+                        if 'uuids' in node.devices['gpu'][key]:
+                            gpus.extend(node.devices['gpu'][key]['uuids'])
                 if mics:
                     env_list.append('OFFLOAD_DEVICES=%s' %
                                     ",".join(mics))
                 if gpus:
                     # Don't put quotes around the values. ex "0" or "0,1".
                     # This will cause it to fail.
-                    env_list.append('CUDA_VISIBLE_DEVICES=%s' %
-                                    ",".join(gpus))
+                    if(cgroup.cfg['gpu_vendor']=="nvidia"):
+                        env_list.append('CUDA_VISIBLE_DEVICES=%s' %
+                                        ",".join(gpus))
+                    if(cgroup.cfg['gpu_vendor']=="amd"):
+                        env_list.append('ROCR_VISIBLE_DEVICES=%s' %
+                                        ",".join(gpus))
                     env_list.append('CUDA_DEVICE_ORDER=PCI_BUS_ID')
-            pbs.logmsg(pbs.EVENT_DEBUG4, 'ENV_LIST: %s' % env_list)
+            pbs.logmsg(pbs.EVENT_DEBUG, 'ENV_LIST: %s' % env_list)
             cgroup.write_job_env_file(event.job.id, env_list)
         # Add jobid to cgroup_jobs file to tell periodic handler that this
         # job is new and its cgroup should not be cleaned up
@@ -1403,9 +1414,14 @@ class HookUtils(object):
                 if gpus:
                     # Don't put quotes around the values. ex "0" or "0,1".
                     # This will cause it to fail.
-                    env_list.append('CUDA_VISIBLE_DEVICES=%s' %
-                                    ",".join(gpus))
+                    if(cgroup.cfg['gpu_vendor']=="nvidia"):
+                        env_list.append('CUDA_VISIBLE_DEVICES=%s' %
+                                        ",".join(gpus))
+                    if(cgroup.cfg['gpu_vendor']=="amd"):
+                        env_list.append('ROCR_VISIBLE_DEVICES=%s' %
+                                        ",".join(gpus))
                     env_list.append('CUDA_DEVICE_ORDER=PCI_BUS_ID')
+                    
             pbs.logmsg(pbs.EVENT_DEBUG4, 'ENV_LIST: %s' % env_list)
             cgroup.write_job_env_file(event.job.id, env_list)
         return True
@@ -1829,7 +1845,6 @@ class NodeUtils(object):
                             # file, so we must get the major, minor and device
                             # type from the matching /dev/nvidia[0-9]*
                             if gpuid.startswith('nvidia'):
-                                pbs.logmsg(pbs.EVENT_DEBUG, "IN nvidia  " )
 
                                 path = os.path.join(os.sep, 'dev', gpuid)
                                 # If the stat fails, continue.
@@ -2168,8 +2183,9 @@ class NodeUtils(object):
             for card in data.keys():
                 name = "amd" + str(card[4:])
                 pci_bus_id = data[card]["PCI Bus"]
-                uuid = data[card]["Unique ID"]
-
+                #strip out the '0x' part in uuid and prefix GPU-
+                uuid = data[card]["Unique ID"].lstrip("0x")
+                uuid = "GPU-"+uuid
                 gpus[name]= {
                     'pci_bus_id' : pci_bus_id,
                     'uuid' : uuid,
@@ -4153,13 +4169,23 @@ class CgroupUtils(object):
         pbs.logmsg(pbs.EVENT_DEBUG4, '%s: Method called' % caller_name())
         if 'devices' in self.subsystems:
             # prevent using GPUs without user awareness
-            pbs.event().env['CUDA_VISIBLE_DEVICES'] = ''
+            if(self.cfg["gpu_vendor"]=='nvidia'):
+                pbs.event().env['CUDA_VISIBLE_DEVICES'] = ''
+            if(self.cfg["gpu_vendor"]=='amd'):
+                pbs.event().env['ROCR_VISIBLE_DEVICES'] = ''
+
+        pbs.logmsg(pbs.EVENT_DEBUG, "SUBSYSTEM : " + str(self.subsystems))
+        pbs.logmsg(pbs.EVENT_DEBUG, "ASSIGNED : " + str(self.assigned_resources))
+
         if 'device_names' in self.assigned_resources:
             names = self.assigned_resources['device_names']
             pbs.logmsg(pbs.EVENT_DEBUG4,
                        'devices: %s' % (names))
             offload_devices = []
             cuda_visible_devices = []
+            rocr_visible_devices = []
+            pbs.logmsg(pbs.EVENT_DEBUG,
+                       'INSIDE DEVICE NAMES :' )
             for name in names:
                 if name.startswith('mic'):
                     offload_devices.append(name[3:])
@@ -4168,6 +4194,12 @@ class CgroupUtils(object):
                         cuda_visible_devices.append(gpus[name]['uuid'])
                     if 'uuids' in gpus[name]:
                         cuda_visible_devices.extend(gpus[name]['uuids'])
+                elif name.startswith('amd'):
+                    if 'uuid' in gpus[name]:
+                        rocr_visible_devices.append(gpus[name]['uuid'])
+                    if 'uuids' in gpus[name]:
+                        rocr_visible_devices.extend(gpus[name]['uuids'])
+
             if offload_devices:
                 value = "\\,".join(offload_devices)
                 pbs.event().env['OFFLOAD_DEVICES'] = '%s' % value
@@ -4179,9 +4211,21 @@ class CgroupUtils(object):
                 pbs.event().env['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
                 pbs.logmsg(pbs.EVENT_DEBUG4,
                            'cuda_visible_devices: %s' % cuda_visible_devices)
+            
+            if rocr_visible_devices:
+                value = "\\,".join(rocr_visible_devices)
+                pbs.event().env['ROCR_VISIBLE_DEVICES'] = '%s' % value
+                pbs.event().env['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+                pbs.logmsg(pbs.EVENT_DEBUG,
+                           'rocr_visible_devices: %s' % rocr_visible_devices)
+
             pbs.logmsg(pbs.EVENT_DEBUG4,
                        'Environment: %s' % pbs.event().env)
-            return [offload_devices, cuda_visible_devices]
+
+            if(self.cfg["gpu_vendor"]=='nvidia'):
+                return [offload_devices, cuda_visible_devices]
+            if(self.cfg["gpu_vendor"]=='amd'):
+                return [offload_devices, rocr_visible_devices]
         else:
             return False
 
@@ -4313,11 +4357,18 @@ class CgroupUtils(object):
             elif device_kind == 'gpu' and not device_info.get('is_gi', False):
                 # Requires the ctrl (255) to be added
                 # unless GPU is a GI from a MIG GPU
-                dev_entry = '%s %d:255 rwm' % (device_info['type'],
-                                               device_info['major'])
+                if(self.cfg['gpu_vendor']=='nvidia'):
+                    dev_entry = '%s %d:255 rwm' % (device_info['type'],
+                                                device_info['major'])
+
+                #TODO add KFD major minor
+                elif(self.cfg['gpu_vendor']=='amd'):
+                    dev_entry = '%s %d:0 rwm' % (device_info['type'],
+                                                device_info ['major'])
+
                 if dev_entry not in device_allowed:
-                    device_allowed.append(dev_entry)
-            # Now append the device name and entry
+                    device_allowed.append(dev_entry)      
+                          # Now append the device name and entry
             device_names.append(dev)
             dev_entry = '%s %d:%d rwm' % (device_info['type'],
                                           device_info['major'],
@@ -4500,7 +4551,12 @@ class CgroupUtils(object):
             if 'device_names' not in assigned:
                 assigned['device_names'] = []
                 assigned['devices'] = []
-            regex = re.compile('.*(nvidia).*')
+            
+            if(self.cfg["gpu_vendor"]=="nvidia"):
+                regex = re.compile('.*(nvidia).*')
+            elif(self.cfg["gpu_vendor"]=="amd"):
+                regex = re.compile('.*(amd).*')
+
             ngpus = int(requested['ngpus'])
             # Use a list comprehension to construct the gpus list
             gpus = [m.group(0)
