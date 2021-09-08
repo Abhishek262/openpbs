@@ -32,7 +32,8 @@
             "exclude_vntypes"    : [],
             "allow"              : [
                 "b *:* rwm",
-                "c *:* rwm"
+                "c *:* rwm",
+                ["kfd", "rwm"]
             ]
         },
         "memory" : {

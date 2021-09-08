@@ -1408,6 +1408,14 @@ class HookUtils(object):
                             gpus.append(node.devices['gpu'][key]['uuid'])
                         if 'uuids' in node.devices['gpu'][key]:
                             gpus.extend(node.devices['gpu'][key]['uuids'])
+
+                    elif (key.startswith('amd')
+                            and "gpu" in node.devices
+                            and key in node.devices['gpu']):
+                        if 'uuid' in node.devices['gpu'][key]:
+                            gpus.append(node.devices['gpu'][key]['uuid'])
+                        if 'uuids' in node.devices['gpu'][key]:
+                            gpus.extend(node.devices['gpu'][key]['uuids'])
                 if mics:
                     env_list.append('OFFLOAD_DEVICES=%s' %
                                     ",".join(mics))
@@ -2151,7 +2159,7 @@ class NodeUtils(object):
         time_start = time.time()
         mig_found = False
         try:
-            # Try running the nvidia-smi command
+            # Try running the rocm-smi command
             process = subprocess.Popen(cmd, shell=False,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE,
@@ -2202,7 +2210,7 @@ class NodeUtils(object):
         cmd = ["/usr/bin/ls","-l","/dev/dri"]
         out = []
         try:
-            # Try running the nvidia-smi command
+            # Try running the rocm-smi command
             process = subprocess.Popen(cmd, shell=False,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE,
@@ -4411,6 +4419,13 @@ class CgroupUtils(object):
                 pbs.logmsg(pbs.EVENT_DEBUG4,
                            'Device major: %s, minor: %s' % (major, minor))
             elif avail_device.find('nvidia') != -1:
+                pbs.logmsg(pbs.EVENT_DEBUG4,
+                           'Check gpu device: %s' % (avail_device))
+                avail_major = node.devices['gpu'][avail_device]['major']
+                avail_minor = node.devices['gpu'][avail_device]['minor']
+                pbs.logmsg(pbs.EVENT_DEBUG4,
+                           'Device major: %s, minor: %s' % (major, minor))
+            elif avail_device.find('amd') != -1:
                 pbs.logmsg(pbs.EVENT_DEBUG4,
                            'Check gpu device: %s' % (avail_device))
                 avail_major = node.devices['gpu'][avail_device]['major']
